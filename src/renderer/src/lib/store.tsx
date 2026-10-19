@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { AccountsState, AppSettings, AutoEvent, AutoStatus, CommandLogEntry, CswapBinaryInfo, UpdaterState } from '@shared/types'
+import type { AccountsState, AppSettings, AutoEvent, AutoStatus, CommandLogEntry, CswapBinaryInfo, UpdaterState, WarmState } from '@shared/types'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { api } from './api'
 
@@ -13,6 +13,7 @@ interface Store {
   autoEvents: AutoEvent[]
   log: CommandLogEntry[]
   updater: UpdaterState
+  warm: WarmState
   page: Page
   setPage: (p: Page) => void
   refresh: () => Promise<void>
@@ -31,6 +32,7 @@ export function StoreProvider({ children }: { children: ReactNode }): React.JSX.
   const [autoEvents, setAutoEvents] = useState<AutoEvent[]>([])
   const [log, setLog] = useState<CommandLogEntry[]>([])
   const [updater, setUpdater] = useState<UpdaterState>({ status: 'disabled', current: '' })
+  const [warm, setWarm] = useState<WarmState>({ running: null, lastPingAt: null, entries: {} })
   const [page, setPage] = useState<Page>('accounts')
   const [now, setNow] = useState(Date.now())
   const mounted = useRef(true)
@@ -44,6 +46,7 @@ export function StoreProvider({ children }: { children: ReactNode }): React.JSX.
     void api.autoEvents().then((e) => mounted.current && setAutoEvents(e))
     void api.getCommandLog().then((l) => mounted.current && setLog(l))
     void api.updaterState().then((u) => mounted.current && setUpdater(u))
+    void api.warmState().then((w) => mounted.current && setWarm(w))
     const offs = [
       api.onAccounts((s) => setAccounts(s)),
       api.onSettings((s) => setSettings(s)),
@@ -52,7 +55,8 @@ export function StoreProvider({ children }: { children: ReactNode }): React.JSX.
       api.onCommandLog((e) => setLog((prev) => [...prev.slice(-299), e])),
       api.onNavigate((p) => setPage(p as Page)),
       api.onUpdater((u) => setUpdater(u)),
-      api.onBinary((b) => setBinary(b))
+      api.onBinary((b) => setBinary(b)),
+      api.onWarm((w) => setWarm(w))
     ]
     const t = setInterval(() => setNow(Date.now()), 15000)
     return () => {
@@ -77,8 +81,8 @@ export function StoreProvider({ children }: { children: ReactNode }): React.JSX.
   }, [])
 
   const value = useMemo<Store>(
-    () => ({ accounts, settings, binary, auto, autoEvents, log, updater, page, setPage, refresh, updateSettings, redetect, now }),
-    [accounts, settings, binary, auto, autoEvents, log, updater, page, refresh, updateSettings, redetect, now]
+    () => ({ accounts, settings, binary, auto, autoEvents, log, updater, warm, page, setPage, refresh, updateSettings, redetect, now }),
+    [accounts, settings, binary, auto, autoEvents, log, updater, warm, page, refresh, updateSettings, redetect, now]
   )
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

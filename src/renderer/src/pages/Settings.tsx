@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react'
-import { ExternalLink, FolderOpen, Monitor, Moon, RefreshCw, Sun, Trash2, ArrowUpCircle } from 'lucide-react'
+import { ExternalLink, Flame, FolderOpen, Monitor, Moon, RefreshCw, Sun, Trash2, ArrowUpCircle } from 'lucide-react'
 import type { UnclaimedEntry, UpdateInfo } from '@shared/types'
 import { useStore } from '../lib/store'
 import { api, isElectron, platform } from '../lib/api'
 import { useToast } from '../lib/toast'
 import { Button, Card, Chip, Field, Input, Segmented, Select, Switch } from '../components/ui'
+import { ageSeconds, maskEmail } from '../lib/format'
 import { PageHeader } from '../components/PageHeader'
 
 export function SettingsPage(): React.JSX.Element {
-  const { settings, updateSettings, binary, redetect, updater } = useStore()
+  const { settings, updateSettings, binary, redetect, updater, warm, accounts, now } = useStore()
   const { notify } = useToast()
   const [pathDraft, setPathDraft] = useState(settings.cswapPath ?? '')
   const [vault, setVault] = useState<string | null>(null)
@@ -162,6 +163,83 @@ export function SettingsPage(): React.JSX.Element {
           </div>
         </Card>
 
+        <Card title="Keep warm" actions={warm.running ? <Chip tone="accent">warming…</Chip> : settings.keepWarm ? <Chip tone="ok">on</Chip> : <Chip tone="muted">off</Chip>}>
+          <div className="space-y-4 px-4 py-3" data-testid="warm-card">
+            <p className="text-[12.5px] text-fg-2">
+              A 5-hour window only starts with the first message, so an account nobody has used has the full five hours still to wait the day you need it. Keep warm sends one one-word message to each idle account, so its window is already running — and spaces them out, so the resets land at different times instead of together.
+            </p>
+            <p className="text-[11.5px] text-fg-3">
+              Each message goes through <span className="mono">cswap run</span> in its own profile, so the login your terminals use is never touched. The account you are using, disabled accounts, accounts that need a login and accounts with no weekly quota left are skipped. Each ping costs a few thousand tokens on the small model.
+            </p>
+            <Field label="Keep idle accounts warm" hint="Checks every minute while the app is running — keep it in the tray." inline>
+              <Switch checked={settings.keepWarm} onChange={(v) => void updateSettings({ keepWarm: v })} label="Keep idle accounts warm" />
+            </Field>
+            <Field label="Space warm-ups at least" hint="So the windows do not all end at the same minute." inline>
+              <Select value={String(settings.keepWarmStaggerMin)} onChange={(e) => void updateSettings({ keepWarmStaggerMin: Number(e.target.value) })} className="w-[120px]" aria-label="Warm-up spacing" data-testid="warm-stagger">
+                {[0, 10, 20, 30, 45, 60, 90].map((m) => (
+                  <option key={m} value={m}>
+                    {m === 0 ? 'No spacing' : `${m} min`}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Model for the message" hint="The smallest one is enough to start a window." inline>
+              <Select value={settings.keepWarmModel} onChange={(e) => void updateSettings({ keepWarmModel: e.target.value })} className="w-[120px]" aria-label="Warm-up model">
+                <option value="haiku">Haiku</option>
+                <option value="sonnet">Sonnet</option>
+              </Select>
+            </Field>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                icon={<Flame size={13} />}
+                loading={busy === 'warm' || !!warm.running}
+                data-testid="warm-now"
+                onClick={async () => {
+                  setBusy('warm')
+                  const r = await api.warmNow()
+                  setBusy(null)
+                  if (!r.ok) notify('error', 'Could not warm up', r.error.message)
+                  else if (!r.value.attempted) notify('info', 'Nothing to warm up', 'Every account is in use, already running a window, out of weekly quota, or needs a login.')
+                  else notify(r.value.failed ? 'error' : 'ok', `Warmed ${r.value.ok} of ${r.value.attempted}`)
+                }}
+              >
+                Warm idle accounts now
+              </Button>
+              {settings.keepWarmExclude.length > 0 && (
+                <Button size="sm" variant="ghost" onClick={() => void updateSettings({ keepWarmExclude: [] })}>
+                  Include all {settings.keepWarmExclude.length} left-out account{settings.keepWarmExclude.length === 1 ? '' : 's'}
+                </Button>
+              )}
+            </div>
+            {Object.keys(warm.entries).length > 0 && (
+              <div>
+                <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-fg-3">Recent</div>
+                <ul className="space-y-1" data-testid="warm-recent">
+                  {Object.entries(warm.entries)
+                    .sort((a, b) => Date.parse(b[1].at) - Date.parse(a[1].at))
+                    .slice(0, 8)
+                    .map(([email, e]) => (
+                      <li key={email} className="flex items-center gap-2 rounded-md border border-border px-2 py-1.5 text-[12px]">
+                        <span className="min-w-0 flex-1 truncate text-fg" title={settings.maskEmails ? undefined : email}>
+                          {maskEmail(email, settings.maskEmails)}
+                          {accounts.payload?.accounts.find((a) => a.email === email) ? '' : ' (removed)'}
+                        </span>
+                        {e.ok ? <Chip tone="ok">window started</Chip> : <Chip tone="danger">failed</Chip>}
+                        <span className="shrink-0 text-fg-3">{ageSeconds((now - Date.parse(e.at)) / 1000)}</span>
+                        {!e.ok && e.message && (
+                          <span className="max-w-[40%] truncate text-danger" title={e.message}>
+                            {e.message}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </Card>
+
         <Card title="Data">
           <div className="space-y-3 px-4 py-3 text-[12.5px] text-fg-2">
             <div>
@@ -220,7 +298,7 @@ export function SettingsPage(): React.JSX.Element {
               <span className="font-medium text-fg">Claude Swap</span> {info?.version}
               {info?.electron && <span className="text-fg-3"> · Electron {info.electron}</span>}
             </div>
-            <p>A desktop front-end for claude-swap. It drives the CLI you already have installed; nothing here talks to Anthropic directly.</p>
+            <p>A desktop front-end for claude-swap. It drives the CLI you already have installed; the only thing it sends to Anthropic itself is the browser sign-in, and that login goes straight into the vault through cswap.</p>
             <div className="rounded-md border border-border bg-bg/50 px-3 py-2" data-testid="updater">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">

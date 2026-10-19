@@ -159,6 +159,38 @@ describe('CswapDriver', () => {
     expect(d.getLog().at(-1)?.args).toEqual(['import', file, '--force'])
   })
 
+  it('importEnvelope sends the envelope on stdin, and --force only when asked', async () => {
+    const d = driver()
+    const env = JSON.stringify({ version: 1, accounts: [{ number: 9, email: 'fresh@example.com', credentials: { claudeAiOauth: { refreshToken: 'SECRET' } }, config: {} }] })
+    const r = await d.importEnvelope(env, false)
+    expect(r.ok).toBe(true)
+    expect(r.ok && r.value.stderr).toContain('Imported fresh@example.com')
+    expect(d.getLog().at(-1)?.args).toEqual(['import', '-'])
+    expect(JSON.stringify(d.getLog())).not.toContain('SECRET')
+    const again = await d.importEnvelope(env, false)
+    expect(again.ok && again.value.stderr).toContain('Skipped')
+    const forced = await d.importEnvelope(env, true)
+    expect(forced.ok && forced.value.stderr).toContain('Overwrote')
+    expect(d.getLog().at(-1)?.args).toEqual(['import', '-', '--force'])
+    const bad = await d.importEnvelope('not json', false)
+    expect(bad.ok).toBe(false)
+  })
+
+  it('warmUp runs the ping in session mode and reports the reason the CLI gives when it is refused', async () => {
+    const d = driver()
+    const ok = await d.warmUp('2', 'haiku', dir)
+    expect(ok.ok && ok.value.reply).toBe('ok')
+    const logged = d.getLog().at(-1)!
+    expect(logged.args.slice(0, 3)).toEqual(['run', '2', '--'])
+    expect(logged.args).toContain('--no-session-persistence')
+    process.env.FAKE_CSWAP_RUN_FAIL = '5-hour limit reached'
+    const refused = await d.warmUp('2', 'haiku', dir)
+    delete process.env.FAKE_CSWAP_RUN_FAIL
+    expect(!refused.ok && refused.error).toEqual({ type: 'WarmError', message: '5-hour limit reached' })
+    const missing = await d.warmUp('99', 'haiku', dir)
+    expect(!missing.ok && missing.error.message).toMatch(/No account found/)
+  })
+
   it('serializes mutations so two concurrent switches never interleave', async () => {
     const d = driver()
     process.env.FAKE_CSWAP_DELAY = '150'

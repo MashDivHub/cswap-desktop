@@ -6,7 +6,9 @@ import type {
   CommandLogEntry,
   CswapApi,
   ListPayload,
-  Result
+  OAuthState,
+  Result,
+  WarmState
 } from '@shared/types'
 import { DEFAULT_SETTINGS } from '@shared/types'
 
@@ -48,6 +50,8 @@ export function createMockApi(): CswapApi {
     payload = { ...payload, activeAccountNumber: n, accounts: payload.accounts.map((a) => ({ ...a, active: a.number === n })) }
     emit('accounts', state())
   }
+  let warm: WarmState = { running: null, lastPingAt: new Date(Date.now() - 40 * 60_000).toISOString(), entries: { 'spare@example.com': { at: new Date(Date.now() - 40 * 60_000).toISOString(), ok: true } } }
+  let login: OAuthState | null = null
   const find = (t: string) => payload.accounts.find((a) => String(a.number) === t || a.email === t || a.alias === t)
 
   return {
@@ -147,6 +151,40 @@ export function createMockApi(): CswapApi {
     upgradeCswap: async () => okOut('claude-swap is already at the latest version'),
     tokenStatus: async () => okOut('Account-1: you@example.com\n  token: valid (expires in 6h) source=keychain\nAccount-2: work@company.com\n  token: expired'),
     launchSession: async (t, cwd) => ({ ok: true, value: { command: `cswap run ${t}`, cwd: cwd ?? '/home/you' } }),
+    oauthStart: async (o) => {
+      record(['oauth', o.slot ? `relogin ${o.slot}` : 'add'])
+      const id = Math.random().toString(16).slice(2, 10)
+      login = { id, stage: 'waiting', url: 'https://claude.com/cai/oauth/authorize?code=true&client_id=mock', manual: !!o.manual, browser: 'chrome', slot: o.slot }
+      const mine = login
+      // The browser step, played out: the person signs in a moment later.
+      setTimeout(() => {
+        if (login?.id !== id) return
+        login = { ...mine, stage: 'ready', identity: { email: o.email ?? 'new.person@example.com', organizationName: '', organizationUuid: 'org-new', plan: 'Max 20x', existingSlot: o.slot ?? null } }
+        emit('oauth', login)
+      }, 2500)
+      return { ok: true, value: login }
+    },
+    oauthReopen: async () => ({ ok: true, value: login! }),
+    oauthSubmitCode: async () => ({ ok: true, value: login! }),
+    oauthCommit: async () => {
+      login = { ...login!, stage: 'done', result: { slot: login!.slot ?? 6, output: 'Imported → slot 6' } }
+      emit('oauth', login)
+      return { ok: true, value: login }
+    },
+    oauthCancel: async () => {
+      login = null
+    },
+    warmState: async () => warm,
+    warmNow: async (t) => {
+      record(['run', t ?? 'idle', '--', '-p', 'ok'])
+      warm = { ...warm, running: t ? (find(t)?.email ?? null) : 'spare@example.com' }
+      emit('warm', warm)
+      await new Promise((r) => setTimeout(r, 1200))
+      const email = warm.running ?? 'spare@example.com'
+      warm = { running: null, lastPingAt: new Date().toISOString(), entries: { ...warm.entries, [email]: { at: new Date().toISOString(), ok: true } } }
+      emit('warm', warm)
+      return { ok: true, value: { attempted: 1, ok: 1, failed: 0 } }
+    },
     updaterState: async () => ({ status: 'disabled', current: '0.0.0-browser' }),
     updaterCheck: async () => ({ status: 'disabled', current: '0.0.0-browser' }),
     updaterInstall: async () => {},
@@ -195,6 +233,8 @@ export function createMockApi(): CswapApi {
     onSettings: on('settings'),
     onNavigate: on('navigate'),
     onUpdater: on('updater'),
-    onBinary: on('binary')
+    onBinary: on('binary'),
+    onOAuth: on('oauth'),
+    onWarm: on('warm')
   }
 }

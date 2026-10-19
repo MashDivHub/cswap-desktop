@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlignLeft, ArrowRightLeft, Gauge, GaugeCircle, ChevronDown, CircleDashed, Download, Ellipsis, Eye, EyeOff, FolderOpen, KeyRound, MoveVertical, Pencil, Plus, Shuffle, Sparkles, Stethoscope, Tag, TerminalSquare, Trash2, Upload, UserPlus } from 'lucide-react'
-import type { Account, Mapping, PlanInfo, UsageWindow } from '@shared/types'
+import { AlignLeft, ArrowRightLeft, Flame, Gauge, GaugeCircle, ChevronDown, CircleDashed, Download, Ellipsis, Eye, EyeOff, FolderOpen, Globe, KeyRound, LogIn, MoveVertical, Pencil, Plus, Settings as SettingsIcon, Shuffle, Sparkles, Stethoscope, Tag, TerminalSquare, Trash2, Upload, UserPlus, Zap } from 'lucide-react'
+import type { Account, Mapping, PlanInfo, UsageWindow, WarmEntry } from '@shared/types'
 import { useStore } from '../lib/store'
 import { useElementWidth } from '../lib/use-width'
 import { api } from '../lib/api'
@@ -9,6 +9,7 @@ import { Bar, Button, Chip, Dialog, Empty, Field, Input, Menu, Select, Switch, c
 import { UsageRing } from '../components/UsageRing'
 import { Tooltip } from '../components/Tooltip'
 import { PageHeader } from '../components/PageHeader'
+import { OAuthDialog } from '../components/OAuthDialog'
 import { ageSeconds, clockOf, maskEmail, orgTag, pct, resetText, statusLabel, statusTone, tone } from '../lib/format'
 
 const T = { num: 28, account: 160, win: 132, ring: 116, status: 148, actions: 104 }
@@ -25,10 +26,10 @@ function gridTemplate(models: number, rings: boolean): string {
   return [`${T.num}px`, `minmax(${T.account}px,2fr)`, ...Array<string>(2 + models).fill(`minmax(${win}px,1fr)`), `${T.status}px`, `${T.actions}px`].join(' ')
 }
 
-type DialogKind = { kind: 'add' } | { kind: 'token' } | { kind: 'diag' } | { kind: 'run'; a: Account } | { kind: 'alias'; a: Account } | { kind: 'move'; a: Account } | { kind: 'remove'; a: Account } | { kind: 'export'; a?: Account } | { kind: 'import' } | null
+type DialogKind = { kind: 'add' } | { kind: 'oauth'; a?: Account } | { kind: 'token' } | { kind: 'diag' } | { kind: 'run'; a: Account } | { kind: 'alias'; a: Account } | { kind: 'move'; a: Account } | { kind: 'remove'; a: Account } | { kind: 'export'; a?: Account } | { kind: 'import' } | null
 
 export function AccountsPage(): React.JSX.Element {
-  const { accounts, now, settings, updateSettings } = useStore()
+  const { accounts, now, settings, updateSettings, warm, setPage } = useStore()
   const { notify } = useToast()
   const [dlg, setDlg] = useState<DialogKind>(null)
   const mask = settings.maskEmails
@@ -74,6 +75,23 @@ export function AccountsPage(): React.JSX.Element {
       return p.message
     })
   const rotate = (strategy?: 'best' | 'next-available'): Promise<boolean> => act(`rotate`, () => api.rotate(strategy), (v) => (v as { message: string }).message)
+
+  // Warm-ups: one named account (whatever its window says), or every idle one.
+  const warmUp = async (a?: Account): Promise<void> => {
+    setBusy(a ? `warm-${a.number}` : 'warm')
+    const r = await api.warmNow(a ? String(a.number) : undefined)
+    setBusy(null)
+    if (!r.ok) return notify('error', 'Could not warm up', r.error.message)
+    const { attempted, ok, failed } = r.value
+    if (!attempted) notify('info', 'Nothing to warm up', 'Every account is either in use, already running a window, out of weekly quota, or needs a login.')
+    else if (failed) notify('error', `Warmed ${ok} of ${attempted}`, 'See the status under each account, or the Log page, for the reason.')
+    else notify('ok', attempted === 1 ? 'Window started' : `Started ${ok} windows`)
+  }
+  const toggleExcluded = (a: Account): void => {
+    const has = settings.keepWarmExclude.some((e) => e.toLowerCase() === a.email.toLowerCase())
+    void updateSettings({ keepWarmExclude: has ? settings.keepWarmExclude.filter((e) => e.toLowerCase() !== a.email.toLowerCase()) : [...settings.keepWarmExclude, a.email] })
+    notify('ok', has ? `${a.alias || a.email} is back in keep-warm` : `${a.alias || a.email} is left out of keep-warm`)
+  }
 
   return (
     <div className="anim-fade pb-8" data-testid="page-accounts">
@@ -122,6 +140,25 @@ export function AccountsPage(): React.JSX.Element {
               onClick={() => void updateSettings({ maskEmails: !mask })}
             />
             <Menu
+              width={270}
+              trigger={() => (
+                <Button
+                  variant="ghost"
+                  className={cx('!px-2', settings.keepWarm && '!text-accent')}
+                  aria-label="Keep warm"
+                  title={warm.running ? `Warming ${warm.running}…` : settings.keepWarm ? 'Keep warm is on' : 'Keep idle accounts warm'}
+                  data-testid="warm-menu"
+                  icon={<Flame size={15} className={cx((warm.running || busy === 'warm') && 'animate-pulse')} />}
+                />
+              )}
+              items={[
+                { label: 'Keep idle accounts warm', hint: settings.keepWarm ? 'on' : 'off', checked: settings.keepWarm, icon: <Flame size={14} />, onSelect: () => void updateSettings({ keepWarm: !settings.keepWarm }) },
+                { label: 'Warm idle accounts now', icon: <Zap size={14} />, disabled: !!warm.running || busy === 'warm', onSelect: () => void warmUp() },
+                { separator: true, label: '' },
+                { label: 'Keep-warm settings', icon: <SettingsIcon size={14} />, onSelect: () => setPage('settings') }
+              ]}
+            />
+            <Menu
               width={260}
               trigger={(open) => (
                 <Button variant="default" icon={<Shuffle size={14} />} loading={busy === 'rotate'} data-testid="rotate-menu" aria-expanded={open}>
@@ -135,13 +172,14 @@ export function AccountsPage(): React.JSX.Element {
               ]}
             />
             <Menu
-              width={240}
+              width={260}
               trigger={() => (
                 <Button variant="primary" icon={<Plus size={14} />} data-testid="add-menu">
                   Add account <ChevronDown size={13} className="opacity-70" />
                 </Button>
               )}
               items={[
+                { label: 'Sign in with the browser', hint: 'no CLI login', icon: <Globe size={14} />, onSelect: () => setDlg({ kind: 'oauth' }) },
                 { label: 'From current Claude login', icon: <UserPlus size={14} />, onSelect: () => setDlg({ kind: 'add' }) },
                 { label: 'From setup-token or API key', icon: <KeyRound size={14} />, onSelect: () => setDlg({ kind: 'token' }) }
               ]}
@@ -188,9 +226,14 @@ export function AccountsPage(): React.JSX.Element {
               </>
             }
             action={
-              <Button variant="primary" icon={<Plus size={14} />} onClick={() => setDlg({ kind: 'add' })}>
-                Add current login
-              </Button>
+              <div className="flex items-center justify-center gap-2">
+                <Button variant="primary" icon={<Globe size={14} />} onClick={() => setDlg({ kind: 'oauth' })}>
+                  Sign in with the browser
+                </Button>
+                <Button icon={<Plus size={14} />} onClick={() => setDlg({ kind: 'add' })}>
+                  Add current login
+                </Button>
+              </div>
             }
           />
         )}
@@ -211,7 +254,7 @@ export function AccountsPage(): React.JSX.Element {
               <span />
             </div>
             {list.map((a) => (
-              <AccountRow key={a.number} a={a} now={now} template={template} models={models} compact={compact} mask={mask} rings={rings} pace={pace} plan={plans[a.email]} busy={busy} onSwitch={() => void switchTo(a)} onAction={(k) => setDlg(k)} onToggleDisabled={() => void act(`dis-${a.number}`, () => api.setDisabled(String(a.number), !a.disabled), () => (a.disabled ? `Account-${a.number} back in rotation` : `Account-${a.number} held out of rotation`))} />
+              <AccountRow key={a.number} a={a} now={now} template={template} models={models} compact={compact} mask={mask} rings={rings} pace={pace} plan={plans[a.email]} busy={busy} warmEntry={warm.entries[a.email]} warming={warm.running === a.email} excluded={settings.keepWarmExclude.some((e) => e.toLowerCase() === a.email.toLowerCase())} onWarm={() => void warmUp(a)} onToggleExcluded={() => toggleExcluded(a)} onSwitch={() => void switchTo(a)} onAction={(k) => setDlg(k)} onToggleDisabled={() => void act(`dis-${a.number}`, () => api.setDisabled(String(a.number), !a.disabled), () => (a.disabled ? `Account-${a.number} back in rotation` : `Account-${a.number} held out of rotation`))} />
               ))}
             </div>
           </div>
@@ -226,6 +269,7 @@ export function AccountsPage(): React.JSX.Element {
         )}
       </div>
 
+      {dlg?.kind === 'oauth' && <OAuthDialog account={dlg.a} onClose={() => setDlg(null)} />}
       <AddAccountDialog open={dlg?.kind === 'add'} onClose={() => setDlg(null)} taken={list.map((a) => a.number)} />
       <AddTokenDialog open={dlg?.kind === 'token'} onClose={() => setDlg(null)} taken={list.map((a) => a.number)} />
       {dlg?.kind === 'alias' && <AliasDialog a={dlg.a} onClose={() => setDlg(null)} />}
@@ -288,7 +332,9 @@ function WindowCell({ w, now, label, name, showName = true, showChip = true, rin
   )
 }
 
-function AccountRow({ a, now, template, models, compact, mask, rings, pace, plan, busy, onSwitch, onAction, onToggleDisabled }: { a: Account; now: number; template: string; models: string[]; compact: boolean; mask: boolean; rings: boolean; pace: boolean; plan?: PlanInfo; busy: string | null; onSwitch: () => void; onAction: (k: DialogKind) => void; onToggleDisabled: () => void }): React.JSX.Element {
+const NEEDS_LOGIN = ['relogin_required', 'token_expired', 'no_credentials']
+
+function AccountRow({ a, now, template, models, compact, mask, rings, pace, plan, busy, warmEntry, warming, excluded, onWarm, onToggleExcluded, onSwitch, onAction, onToggleDisabled }: { a: Account; now: number; template: string; models: string[]; compact: boolean; mask: boolean; rings: boolean; pace: boolean; plan?: PlanInfo; busy: string | null; warmEntry?: WarmEntry; warming: boolean; excluded: boolean; onWarm: () => void; onToggleExcluded: () => void; onSwitch: () => void; onAction: (k: DialogKind) => void; onToggleDisabled: () => void }): React.JSX.Element {
   const usage = a.usage ?? a.lastGoodUsage ?? null
   const stale = !a.usage && !!a.lastGoodUsage
   const sTone = statusTone(a.usageStatus)
@@ -344,6 +390,26 @@ function AccountRow({ a, now, template, models, compact, mask, rings, pace, plan
         </span>
       )}
       {!stale && a.usageAgeSeconds !== undefined && a.usageAgeSeconds >= 60 && <span className="text-[11px] text-fg-3">{ageSeconds(a.usageAgeSeconds)}</span>}
+      {NEEDS_LOGIN.includes(a.usageStatus) && (
+        <Button size="sm" icon={<LogIn size={13} />} onClick={() => onAction({ kind: 'oauth', a })} data-testid={`fix-login-${a.number}`} title="Sign in again in the browser — the login your terminals use is not touched">
+          Fix login
+        </Button>
+      )}
+      {warming ? (
+        <span className="flex items-center gap-1 text-[11px] text-accent" data-testid={`warm-status-${a.number}`}>
+          <Flame size={11} className="animate-pulse" /> warming…
+        </span>
+      ) : warmEntry && now - Date.parse(warmEntry.at) < 6 * 3600_000 ? (
+        warmEntry.ok ? (
+          <span className="flex items-center gap-1 text-[11px] text-fg-3" title={`A one-word message was sent at ${clockOf(warmEntry.at)} to start the 5-hour window`} data-testid={`warm-status-${a.number}`}>
+            <Flame size={11} /> warmed {ageSeconds((now - Date.parse(warmEntry.at)) / 1000)}
+          </span>
+        ) : (
+          <span className="text-[11px] text-danger" title={warmEntry.message} data-testid={`warm-status-${a.number}`}>
+            warm-up failed
+          </span>
+        )
+      ) : null}
     </>
   )
 
@@ -361,6 +427,9 @@ function AccountRow({ a, now, template, models, compact, mask, rings, pace, plan
           { label: a.disabled ? 'Enable (back in rotation)' : 'Disable (hold out of rotation)', icon: a.disabled ? <Eye size={14} /> : <EyeOff size={14} />, onSelect: onToggleDisabled },
           { separator: true, label: '' },
           { label: 'Open terminal as this account', hint: `cswap run ${a.number}`, icon: <TerminalSquare size={14} />, onSelect: () => onAction({ kind: 'run', a }) },
+          { label: 'Sign in again with the browser', icon: <LogIn size={14} />, disabled: a.usageStatus === 'api_key', onSelect: () => onAction({ kind: 'oauth', a }) },
+          { label: 'Warm up now', hint: 'start the 5-hour window', icon: <Flame size={14} />, disabled: a.active || a.usageStatus === 'api_key' || busy === `warm-${a.number}`, onSelect: onWarm },
+          { label: excluded ? 'Include in keep-warm' : 'Leave out of keep-warm', icon: <Flame size={14} />, onSelect: onToggleExcluded },
           { label: 'Export this account', icon: <Download size={14} />, onSelect: () => onAction({ kind: 'export', a }) },
           { label: 'Re-add from the current login', hint: `slot ${a.number}`, icon: <Pencil size={14} />, onSelect: () => onAction({ kind: 'add' }) },
           { separator: true, label: '' },

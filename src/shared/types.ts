@@ -208,6 +208,17 @@ export interface AppSettings {
   usageView: 'bars' | 'rings'
   showPace: boolean
   sidebarCollapsed: boolean
+  /** Ping idle accounts so their 5-hour window is already running when you get to them. */
+  keepWarm: boolean
+  /** Minimum minutes between two warm-ups, so the resets spread out instead of landing together. */
+  keepWarmStaggerMin: number
+  keepWarmModel: string
+  /** Emails kept out of keep-warm (the account list is keyed by email in this app's own files). */
+  keepWarmExclude: string[]
+  /** Which browser the sign-in page opens in. */
+  loginBrowser: 'chrome' | 'default'
+  /** Open the sign-in page in a private window, so a different account can be picked. */
+  loginPrivate: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -225,7 +236,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   refreshOnFocus: true,
   usageView: 'bars',
   showPace: true,
-  sidebarCollapsed: false
+  sidebarCollapsed: false,
+  keepWarm: false,
+  keepWarmStaggerMin: 30,
+  keepWarmModel: 'haiku',
+  keepWarmExclude: [],
+  loginBrowser: 'chrome',
+  loginPrivate: true
 }
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: CswapError }
@@ -275,6 +292,73 @@ export interface PlainOutput {
   exitCode: number | null
 }
 
+// ---- browser sign-in ----------------------------------------------------------------
+// Signing in from a browser instead of the terminal: the app runs the same OAuth (PKCE)
+// flow Claude Code does, then hands the result to `cswap import` over stdin. The live
+// Claude Code login — and every CLI session using it — is never touched.
+
+export interface OAuthStartOptions {
+  /** Re-login for this slot: the email becomes the sign-in hint and the result must match it. */
+  slot?: number
+  email?: string
+  /** Show the code on claude.com for pasting, instead of redirecting back to this machine. */
+  manual?: boolean
+}
+
+export type OAuthStage = 'waiting' | 'exchanging' | 'ready' | 'committing' | 'done' | 'error' | 'cancelled'
+
+export interface OAuthIdentity {
+  email: string
+  organizationName: string
+  organizationUuid: string
+  plan: string | null
+  /** The managed slot that already holds this identity, if any. */
+  existingSlot: number | null
+}
+
+export interface OAuthState {
+  id: string
+  stage: OAuthStage
+  /** The sign-in page, for copying into a different browser. */
+  url: string
+  manual: boolean
+  /** What actually opened it; null when nothing could be launched. */
+  browser: 'chrome' | 'default' | null
+  slot?: number
+  identity?: OAuthIdentity
+  /** Re-login only: the person who signed in is not the account in the slot. */
+  mismatch?: boolean
+  error?: string
+  result?: { slot: number | null; output: string; note?: string }
+}
+
+export interface OAuthCommitOptions {
+  alias?: string
+  /** Re-login that landed on another identity: keep it, as a new (or its own existing) account. */
+  asNew?: boolean
+}
+
+// ---- keep warm ----------------------------------------------------------------------
+
+export interface WarmEntry {
+  at: string
+  ok: boolean
+  message?: string
+}
+
+export interface WarmState {
+  /** Email of the account being pinged right now. */
+  running: string | null
+  lastPingAt: string | null
+  entries: Record<string, WarmEntry>
+}
+
+export interface WarmSummary {
+  attempted: number
+  ok: number
+  failed: number
+}
+
 // What the renderer can call. Implemented in preload over ipcRenderer.invoke.
 export interface CswapApi {
   // state
@@ -308,6 +392,16 @@ export interface CswapApi {
   upgradeCswap(): Promise<Result<PlainOutput>>
   tokenStatus(): Promise<Result<PlainOutput>>
   launchSession(target: string, cwd?: string): Promise<Result<{ command: string; cwd: string }>>
+  // browser sign-in (add an account, or fix a dead login) without touching the live CLI login
+  oauthStart(opts: OAuthStartOptions): Promise<Result<OAuthState>>
+  oauthReopen(id: string): Promise<Result<OAuthState>>
+  oauthSubmitCode(id: string, text: string): Promise<Result<OAuthState>>
+  oauthCommit(id: string, opts: OAuthCommitOptions): Promise<Result<OAuthState>>
+  oauthCancel(id: string): Promise<void>
+  // keep warm
+  warmState(): Promise<WarmState>
+  /** One account (slot / email) regardless of its window, or every idle one when omitted. */
+  warmNow(target?: string): Promise<Result<WarmSummary>>
   checkForUpdate(): Promise<UpdateInfo>
   updaterState(): Promise<UpdaterState>
   updaterCheck(): Promise<UpdaterState>
@@ -342,6 +436,8 @@ export interface CswapApi {
   onNavigate(cb: (page: string) => void): () => void
   onUpdater(cb: (st: UpdaterState) => void): () => void
   onBinary(cb: (info: CswapBinaryInfo) => void): () => void
+  onOAuth(cb: (st: OAuthState) => void): () => void
+  onWarm(cb: (st: WarmState) => void): () => void
 }
 
 export const IPC = {
@@ -370,6 +466,13 @@ export const IPC = {
   upgradeCswap: 'cswap:upgrade',
   tokenStatus: 'cswap:tokenStatus',
   launchSession: 'cswap:launchSession',
+  oauthStart: 'oauth:start',
+  oauthReopen: 'oauth:reopen',
+  oauthSubmitCode: 'oauth:submitCode',
+  oauthCommit: 'oauth:commit',
+  oauthCancel: 'oauth:cancel',
+  warmState: 'warm:state',
+  warmNow: 'warm:now',
   checkForUpdate: 'app:checkForUpdate',
   updaterState: 'update:state',
   updaterCheck: 'update:check',
@@ -400,5 +503,7 @@ export const IPC = {
   evCommandLog: 'ev:commandLog',
   evSettings: 'ev:settings',
   evNavigate: 'ev:navigate',
-  evBinary: 'ev:binary'
+  evBinary: 'ev:binary',
+  evOAuth: 'ev:oauth',
+  evWarm: 'ev:warm'
 } as const

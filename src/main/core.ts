@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { Notification } from 'electron'
+import { Notification, net, shell } from 'electron'
 import pkg from '../../package.json'
 import { CswapDriver, parseMappings, parseUnclaimed } from './cswap/driver'
 import { AutoSwitchRunner } from './cswap/auto'
@@ -8,6 +8,8 @@ import { findUv, resolveCswap } from './cswap/resolve'
 import { SettingsStore } from './settings'
 import { PlanStore } from './plan'
 import { Updater } from './updater'
+import { LoginManager } from './login'
+import { WarmScheduler } from './warm'
 import { VaultWatcher, defaultVaultPath, readMappingsFile, vaultFromSettingsPath } from './vault'
 import type {
   AccountsState,
@@ -28,6 +30,8 @@ export class AppCore extends EventEmitter {
   readonly plans: PlanStore
   readonly vault = new VaultWatcher()
   readonly updater = new Updater()
+  readonly warm: WarmScheduler
+  readonly login: LoginManager
   private binary: CswapBinaryInfo | null = null
   private accounts: AccountsState = { payload: null, fetchedAt: null, refreshing: false, error: null, plans: {} }
   private refreshTimer: NodeJS.Timeout | null = null
@@ -38,6 +42,24 @@ export class AppCore extends EventEmitter {
     super()
     this.settings = new SettingsStore(userData)
     this.plans = new PlanStore(userData)
+    this.warm = new WarmScheduler({
+      driver: this.driver,
+      accounts: () => this.accounts,
+      refresh: () => this.refresh(),
+      settings: () => this.settings.get(),
+      userData
+    })
+    this.login = new LoginManager({
+      driver: this.driver,
+      accounts: () => this.accounts.payload?.accounts ?? [],
+      settings: () => this.settings.get(),
+      refresh: () => this.refresh(),
+      // Chromium's network stack, so a system proxy and the OS certificate store apply.
+      fetch: (url, init) => net.fetch(url, init),
+      openDefault: (url) => void shell.openExternal(url)
+    })
+    this.warm.on('state', (st) => this.emit('warm', st))
+    this.login.on('state', (st) => this.emit('oauth', st))
     this.driver.on('log', (e) => this.emit('log', e))
     this.auto.on('event', (ev: AutoEvent) => this.onAutoEvent(ev))
     this.auto.on('status', (st) => this.emit('autoStatus', st))
@@ -45,6 +67,7 @@ export class AppCore extends EventEmitter {
       this.emit('settings', s)
       this.scheduleRefresh()
       this.updater.schedule(s.autoUpdate)
+      this.warm.configure()
     })
     this.vault.on('change', () => void this.refresh())
     this.updater.on('state', (st) => this.emit('updater', st))
@@ -54,6 +77,7 @@ export class AppCore extends EventEmitter {
     await this.detectBinary()
     this.scheduleRefresh()
     this.updater.schedule(this.settings.get().autoUpdate)
+    this.warm.configure()
     if (this.binary?.path) {
       void this.refresh()
       if (this.settings.get().autoStartAutoSwitch) this.auto.start(this.driver.getBinary(), { dryRun: this.settings.get().autoDryRun })
@@ -190,6 +214,8 @@ export class AppCore extends EventEmitter {
   dispose(): void {
     if (this.refreshTimer) clearInterval(this.refreshTimer)
     this.updater.dispose()
+    this.warm.dispose()
+    this.login.dispose()
     this.vault.close()
     void this.auto.stop()
   }

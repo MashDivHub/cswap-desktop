@@ -4,7 +4,7 @@
 //   FAKE_CSWAP_STATE  path to the state file (default: ./fake-cswap-state.json)
 //   FAKE_CSWAP_DELAY  ms to sleep before answering (default 0)
 //   FAKE_CSWAP_FAIL   verb name that should fail with an error envelope
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const STATE = process.env.FAKE_CSWAP_STATE || 'fake-cswap-state.json'
@@ -41,6 +41,29 @@ function save(s) {
   mkdirSync(dirname(STATE) || '.', { recursive: true })
   writeFileSync(STATE, JSON.stringify(s, null, 2))
 }
+// The real cswap serialises itself with file locks. Two fake processes reading and writing
+// one state file at the same moment would lose each other's updates, so every call but the
+// long-running `auto` takes this lock until it exits.
+function lock() {
+  const path = `${STATE}.lock`
+  mkdirSync(dirname(path) || '.', { recursive: true })
+  for (let i = 0; i < 600; i++) {
+    try {
+      closeSync(openSync(path, 'wx'))
+      return () => {
+        try {
+          unlinkSync(path)
+        } catch {
+          /* already gone */
+        }
+      }
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+    }
+  }
+  return () => {} // a stale lock from a killed process: carry on rather than hang the test
+}
 const iso = (secs) => new Date(Date.now() + secs * 1000).toISOString()
 function window(pct, secs, weekly) {
   const w = { pct, resetsAt: iso(secs), countdown: `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`, clock: '09:00' }
@@ -62,7 +85,7 @@ function row(num, a, active) {
   if (a.disabled) r.disabled = true
   if (!a.usageStatus && a.usage) {
     r.usage = {
-      fiveHour: window(a.usage.five_hour, a.resetsIn5h ?? 3.5 * 3600),
+      fiveHour: a.idle ? { pct: 0 } : window(a.usage.five_hour, a.resetsIn5h ?? 3.5 * 3600),
       sevenDay: window(a.usage.seven_day, 2 * 86400 + 3600, true)
     }
     if (a.usage.scoped) r.usage.scoped = a.usage.scoped.map((s) => ({ ...window(s.pct, 2 * 86400, true), name: s.name }))
@@ -91,9 +114,58 @@ const fail = (type, message, json) => {
   process.exit(1)
 }
 
+// `cswap import -`: the version-1 envelope on stdin, answered the way the real CLI does
+// (progress on stderr). Credentials are never stored here — only whether they arrived.
+function importFromStdin(s) {
+  let env
+  try {
+    env = JSON.parse(readStdin())
+  } catch {
+    fail('TransferError', 'export file is not valid JSON', false)
+  }
+  if (env.version !== 1) fail('TransferError', `unsupported export version: ${env.version}`, false)
+  const force = argv.includes('--force')
+  let imported = 0
+  let overwrote = 0
+  let skipped = 0
+  for (const a of env.accounts ?? []) {
+    const found = Object.entries(s.accounts).find(([, x]) => x.email === a.email && (x.organizationUuid || '') === (a.organizationUuid || ''))
+    const arrived = !!a.credentials?.claudeAiOauth?.refreshToken
+    if (found) {
+      if (!force) {
+        err(`Skipped ${a.email} (already exists, use --force)`)
+        skipped++
+        continue
+      }
+      const [n, x] = found
+      // The real import rewrites the whole record: alias comes from the envelope, a hold is dropped.
+      const next = { ...x, organizationName: a.organizationName ?? x.organizationName, loginArrived: arrived, idle: true, usage: x.usage ?? { five_hour: 0, seven_day: 0 } }
+      delete next.disabled
+      delete next.usageStatus
+      if (a.alias) next.alias = a.alias
+      else delete next.alias
+      s.accounts[n] = next
+      err(`Overwrote ${a.email} (slot ${n})`)
+      overwrote++
+    } else {
+      let n = String(a.number)
+      if (s.accounts[n]) n = String(Math.max(0, ...s.sequence) + 1)
+      s.accounts[n] = { email: a.email, organizationName: a.organizationName || '', organizationUuid: a.organizationUuid || '', loginArrived: arrived, idle: true, usage: { five_hour: 0, seven_day: 0 }, ...(a.alias ? { alias: a.alias } : {}) }
+      if (!s.sequence.includes(Number(n))) s.sequence.push(Number(n))
+      s.sequence.sort((x, y) => x - y)
+      err(`Imported ${a.email} → slot ${n}`)
+      imported++
+    }
+  }
+  s.lastImport = { force, accounts: (env.accounts ?? []).map((a) => a.email) }
+  save(s)
+  err(`Done: ${imported} imported, ${overwrote} overwritten, ${skipped} skipped`)
+}
+
 async function main() {
   const delay = Number(process.env.FAKE_CSWAP_DELAY || 0)
   if (delay) await new Promise((r) => setTimeout(r, delay))
+  if (argv[0] !== 'auto') process.on('exit', lock())
   const s = load()
   const json = argv.includes('--json')
   const verb = argv[0]
@@ -396,6 +468,7 @@ async function main() {
     }
     case 'import': {
       const path = pos[1]
+      if (path === '-') return importFromStdin(s)
       if (!path || !existsSync(path)) fail('ConfigError', `File not found: ${path}`, json)
       const envelope = JSON.parse(readFileSync(path, 'utf8'))
       let imported = 0
@@ -416,6 +489,24 @@ async function main() {
       s.sequence.sort((x, y) => x - y)
       save(s)
       out(`Imported ${imported} account(s), skipped ${skipped}`)
+      return
+    }
+    // Session mode. `run N -- -p …` is the keep-warm ping: it answers like `claude -p
+    // --output-format json` and leaves the account with a running 5-hour window.
+    case 'run': {
+      const n = resolve(s, pos[1])
+      if (!n) fail('AccountNotFoundError', `No account found with identifier: ${pos[1]}`, json)
+      out(`Launching Account-${n} (${s.accounts[n].email}) [session mode]`)
+      if (!argv.includes('-p')) return out('(interactive session)')
+      if (process.env.FAKE_CSWAP_RUN_FAIL) {
+        out(JSON.stringify({ type: 'result', subtype: 'success', is_error: true, result: process.env.FAKE_CSWAP_RUN_FAIL }))
+        process.exit(1)
+      }
+      s.accounts[n].idle = false
+      s.accounts[n].resetsIn5h = 5 * 3600
+      s.accounts[n].pings = (s.accounts[n].pings ?? 0) + 1
+      save(s)
+      out(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0.001 }))
       return
     }
     case 'unclaimed': {

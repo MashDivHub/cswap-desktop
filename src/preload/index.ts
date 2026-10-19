@@ -35,6 +35,13 @@ const api: CswapApi = {
   upgradeCswap: () => ipcRenderer.invoke(IPC.upgradeCswap),
   tokenStatus: () => ipcRenderer.invoke(IPC.tokenStatus),
   launchSession: (t, cwd) => ipcRenderer.invoke(IPC.launchSession, t, cwd),
+  oauthStart: (o) => ipcRenderer.invoke(IPC.oauthStart, o),
+  oauthReopen: (id) => ipcRenderer.invoke(IPC.oauthReopen, id),
+  oauthSubmitCode: (id, t) => ipcRenderer.invoke(IPC.oauthSubmitCode, id, t),
+  oauthCommit: (id, o) => ipcRenderer.invoke(IPC.oauthCommit, id, o),
+  oauthCancel: (id) => ipcRenderer.invoke(IPC.oauthCancel, id),
+  warmState: () => ipcRenderer.invoke(IPC.warmState),
+  warmNow: (t) => ipcRenderer.invoke(IPC.warmNow, t),
   checkForUpdate: () => ipcRenderer.invoke(IPC.checkForUpdate),
   updaterState: () => ipcRenderer.invoke(IPC.updaterState),
   updaterCheck: () => ipcRenderer.invoke(IPC.updaterCheck),
@@ -64,7 +71,9 @@ const api: CswapApi = {
   onSettings: on(IPC.evSettings),
   onNavigate: on(IPC.evNavigate),
   onUpdater: on(IPC.evUpdater),
-  onBinary: on(IPC.evBinary)
+  onBinary: on(IPC.evBinary),
+  onOAuth: on(IPC.evOAuth),
+  onWarm: on(IPC.evWarm)
 }
 
 contextBridge.exposeInMainWorld('cswap', api)

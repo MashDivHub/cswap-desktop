@@ -4,7 +4,7 @@ import type { AppCore } from './core'
 import { appInfo } from './core'
 import { launchSession } from './session'
 import { checkForUpdate } from './update'
-import { IPC, type AddAccountOptions, type AddTokenOptions, type AppSettings, type ExportOptions, type ImportOptions } from '@shared/types'
+import { IPC, type AddAccountOptions, type AddTokenOptions, type AppSettings, type ExportOptions, type ImportOptions, type OAuthCommitOptions, type OAuthStartOptions } from '@shared/types'
 
 // e2e seam: when set, native dialogs answer from this JSON file instead of opening
 // ({ directory, openFile, saveFile, binary } — a null means "cancelled").
@@ -31,6 +31,8 @@ export function registerIpc(core: AppCore, getWindow: () => BrowserWindow | null
   core.on('settings', (s) => broadcast(IPC.evSettings, s))
   core.on('updater', (s) => broadcast(IPC.evUpdater, s))
   core.on('binary', (b) => broadcast(IPC.evBinary, b))
+  core.on('oauth', (s) => broadcast(IPC.evOAuth, s))
+  core.on('warm', (s) => broadcast(IPC.evWarm, s))
 
   const d = core.driver
   ipcMain.handle(IPC.getAccounts, () => core.getAccounts())
@@ -101,6 +103,13 @@ export function registerIpc(core: AppCore, getWindow: () => BrowserWindow | null
 
   ipcMain.handle(IPC.tokenStatus, () => d.tokenStatus())
   ipcMain.handle(IPC.launchSession, (_e, t: string, cwd?: string) => launchSession(d.getBinary(), t, cwd))
+  ipcMain.handle(IPC.oauthStart, (_e, o: OAuthStartOptions) => core.login.start(o ?? {}))
+  ipcMain.handle(IPC.oauthReopen, (_e, id: string) => core.login.reopen(id))
+  ipcMain.handle(IPC.oauthSubmitCode, (_e, id: string, text: string) => core.login.submitCode(id, text))
+  ipcMain.handle(IPC.oauthCommit, (_e, id: string, o: OAuthCommitOptions) => core.login.commit(id, o ?? {}))
+  ipcMain.handle(IPC.oauthCancel, (_e, id: string) => core.login.cancel(id))
+  ipcMain.handle(IPC.warmState, () => core.warm.getState())
+  ipcMain.handle(IPC.warmNow, (_e, target?: string) => core.warm.warmNow(target))
   ipcMain.handle(IPC.checkForUpdate, () => checkForUpdate(appInfo().version))
   ipcMain.handle(IPC.updaterState, () => core.updater.getState())
   ipcMain.handle(IPC.updaterCheck, () => core.updater.check())

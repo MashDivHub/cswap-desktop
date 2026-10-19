@@ -34,7 +34,8 @@ function killTree(pid: number | undefined, fallback: () => void): void {
 }
 
 function quoteWin(a: string): string {
-  return /[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a
+  // An empty argument has to be quoted too, or the shell drops it and the next one shifts left.
+  return a === '' || /[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a
 }
 
 export class CswapDriver extends EventEmitter {
@@ -188,6 +189,28 @@ export class CswapDriver extends EventEmitter {
       this.plain(await this.run(args, { stdin: `${token.trim()}\n${overwrite ? 'y' : 'n'}\n`, timeoutMs: 60000 }))
     )
   }
+  // `cswap import -`: the envelope arrives on stdin, so credentials never touch disk or argv.
+  // A plain import leaves a healthy slot alone; --force replaces it (a re-login must).
+  importEnvelope(json: string, force: boolean): Promise<Result<PlainOutput>> {
+    const args = ['import', '-']
+    if (force) args.push('--force')
+    return this.serial(async () => this.plain(await this.run(args, { stdin: json, timeoutMs: 120000 })))
+  }
+  // Session mode (`cswap run`): Claude Code runs against a per-account profile, so the live
+  // login — and every terminal using it — is never touched. One tiny prompt starts the
+  // account's 5-hour window; --output-format json says whether it actually went through.
+  // Goes through the mutation queue because it can bootstrap a profile and rotate a token.
+  warmUp(target: string, model: string, cwd: string): Promise<Result<{ reply: string }>> {
+    const args = ['run', target, '--', ...warmArgs(model)]
+    return this.serial(async () => {
+      const out = await this.run(args, { cwd, timeoutMs: 180000 })
+      if (out.spawnError) return { ok: false, error: { type: 'SpawnError', message: out.spawnError } }
+      const reply = parseWarmReply(out.stdout)
+      if (reply && !reply.isError && out.exitCode === 0) return { ok: true, value: { reply: reply.text } }
+      const message = reply?.text || (out.stderr || out.stdout || `exit ${out.exitCode}`).trim().split(/\r?\n/).slice(-3).join(' ').slice(0, 300)
+      return { ok: false, error: { type: 'WarmError', message } }
+    })
+  }
   removeAccount(target: string): Promise<Result<PlainOutput>> {
     // The UI confirms first; cswap's own "[y/N]" prompt is answered on stdin.
     return this.serial(async () => this.plain(await this.run(['remove', target], { stdin: 'y\n', timeoutMs: 60000 })))
@@ -272,6 +295,29 @@ export class CswapDriver extends EventEmitter {
   upgrade(): Promise<Result<PlainOutput>> {
     return this.serial(async () => this.plain(await this.run(['upgrade'], { timeoutMs: 300000 })))
   }
+}
+
+// The ping itself. A one-word question, one turn, no tools, no saved transcript: it costs a
+// few tokens and exists only so the account has a running 5-hour window.
+export const WARM_PROMPT = 'Reply with the single word: ok'
+export function warmArgs(model: string): string[] {
+  return ['-p', WARM_PROMPT, '--model', model, '--max-turns', '1', '--output-format', 'json', '--no-session-persistence', '--tools', '']
+}
+
+// `claude -p --output-format json` prints one object; cswap adds a "Launching …" line before it.
+export function parseWarmReply(stdout: string): { isError: boolean; text: string } | null {
+  for (const raw of stdout.split(/\r?\n/).reverse()) {
+    const line = raw.trim()
+    if (!line.startsWith('{')) continue
+    try {
+      const o = JSON.parse(line) as { is_error?: boolean; result?: unknown; subtype?: string }
+      if (typeof o !== 'object' || o === null) continue
+      return { isError: o.is_error === true, text: typeof o.result === 'string' ? o.result.trim() : String(o.subtype ?? '') }
+    } catch {
+      /* not the JSON line */
+    }
+  }
+  return null
 }
 
 // `cswap map` has no --json; its lines look like:

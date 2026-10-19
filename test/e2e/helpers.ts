@@ -32,6 +32,8 @@ export interface FakeState {
   mappings: Record<string, { email: string; organizationUuid?: string }>
   settings: Record<string, unknown>
   log: string[][]
+  /** What the last `import -` carried (never the credentials themselves). */
+  lastImport?: { force: boolean; accounts: string[] }
 }
 
 export interface Launched {
